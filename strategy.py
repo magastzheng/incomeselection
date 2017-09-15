@@ -8,18 +8,20 @@ import pandas as pd
 import numpy as np
 import json
 import fileutil
+import matplotlib.pyplot as plt
 
 class SelectItem:
-	def __init__(self, secuCode, industryCode, afloatcap, income, weights_cap, weights_in):
+	def __init__(self, secuCode, industryCode, closeprice, afloatcap, income, weights_cap, weights_in):
 		self.secuCode = secuCode
 		self.industryCode = industryCode
+		self.closeprice = closeprice
 		self.afloatcap = afloatcap
 		self.income = income
 		self.weights_cap = weights_cap
 		self.weights_in = weights_in
 		
 	def __repr__(self):
-		return repr((self.secuCode, self.industryCode, self.afloatcap, self.income, self.weights_cap, self.weights_in))
+		return repr((self.secuCode, self.industryCode, self.closeprice, self.afloatcap, self.income, self.weights_cap, self.weights_in))
 	#def __str__(self):
 	#	return self.__dict__
 
@@ -82,11 +84,12 @@ def getSelectItem(df):
 		secuCode = row['SecuCode']
 		industryCode = row['IndustrySecuCode_I']
 		afloatcap = float(row['AFloatsCap'])
+		closeprice = float(row['ClosePrice'])
 		income = float(row['TTMIncome'])
 		weights_cap = afloatcap/totalcap
 		weights_in = income/totalin
 		
-		item = SelectItem(secuCode, industryCode, afloatcap, income, weights_cap, weights_in)
+		item = SelectItem(secuCode, industryCode, closeprice, afloatcap, income, weights_cap, weights_in)
 		itemlst.append(item)
 		
 	return itemlst
@@ -118,14 +121,130 @@ def handleAllDay(tds, curpath):
 		preitems = items
 		ports[td] = items
 	return ports, nullrecord
+
+def allocate(items, totalcap):
+	#items - 本期列表
+	#totalcap - 本期总市值
+	#计算各种权重分配的持股数
+	#return - 返回新的列表，在原有基础上添加先字段表示持股数
+	
+	num = len(items)
+	nitems = []
+	for item in items:
+		item["shares_cap"] = totalcap*item["weights_cap"]
+		item["shares_in"] = totalcap * item["weights_in"]
+		item["shares_eq"] = totalcap / num
+		nitems.append(item)
+	return nitems
+
+def settle(items, df):
+	#计算持股到期时的总市值
+	#items - 持股列表
+	#df - 到期日所有市场行情
+	#return - 返回新的列表，在原有列表基础上添加新字段表示到期市值
+	
+	nitems = []
+	for item in items:
+		secuCode = item['secuCode']
+		#print("****{0}****".format(secuCode))
+		closeprice = 0.0
+		newdf = df[df['SecuCode'].isin([secuCode])]
+		if len(newdf) > 0:
+			closeprice = float(newdf[newdf['SecuCode'] == secuCode]['ClosePrice'])
 		
+		item['weights_cap_cap'] = closeprice * item['shares_cap']
+		item['weights_in_cap'] = closeprice * item['shares_in']
+		item['weights_eq_cap'] = closeprice * item['shares_eq']
+		
+		nitems.append(item)
+		
+	return nitems
+
+def getcaponeperiod(td, items):
+	#td - 交易日
+	#items - 一期组合
+	#return - 一个字典包含交易日，市值等
+	weights_cap_total = sum(d['weights_cap_cap'] for d in items)
+	weights_in_total = sum(d['weights_in_cap'] for d in items)
+	weights_eq_total = sum(d['weights_eq_cap'] for d in items)
+	p = {"td": td, "weights_cap": weights_cap_total, "weights_in": weights_in_total, "weights_eq": weights_eq_total}
+	
+	return p
+	
+def getcap(tds, dictdata, totalcap):
+	#tds - 排过序的交易日
+	#dictdata - 每一期选出的股票，key: 交易日，value: 为股票组合列表
+	#totalcap - 初始总投入
+	#return - 每一期总市值
+	
+	data = []
+	for td in tds:
+		items = dictdata[td]
+		p = getcaponeperiod(items)
+		data.append(p)
+		
+	return data
+
+	
+def workflow(tds, ports):
+	#tds - 排好序的交易日
+	#ports - 选出的每期组合, key: 交易日, value: 为股票组合列表
+	#return - 
+	
+	datas = []
+	num = len(tds)
+	totalcap = 10000
+	for i in range(num):
+		td = tds[i]
+		items = ports[td]
+		nitems = allocate(items, totalcap)
+		#print("====={0}=====".format(td))
+		if i < num:
+			filename = "./data/{0}.pkl".format(tds[i+1])
+			df = pd.read_pickle(filename)
+			citems = settle(nitems, df)
+			p = getcaponeperiod(td, citems)
+			
+			datas.append(p)
+		else:
+			p = {"td": td, "weights_cap": 0, "weights_in": 0, "weights_eq": 0}
+			datas.append(p)
+			
+	return datas
+
+def draw(datas):
+	x = []
+	xlabel = []
+	y_cap = []
+	y_in = []
+	y_eq = []
+	
+	size = len(datas)
+	for i in range(size):
+		current = datas[i]
+		x.append(i+1)
+		xlabel.append(current.td)
+		y_cap.append(current["weights_cap"])
+		y_in.append(current["weights_in"])
+		y_eq.append(current["weights_eq"])
+	
+	fig,ax = plt.subplots()
+	#设置横坐标
+	ax.set_xticks(x)
+	ax.set_xticklabels(xlabel, rotation=40)
+	#plt.xticks(x, xlabel)
+	plt.plot(x, y_cap)
+	plt.plot(x, y_in)
+	plt.plot(x, y_eq)
+	plt.show()
+	
 if __name__ == "__main__":
 	#获得交易日
 	filename_td = "./data/tradingday_monthly.pkl"
 	#tddf = getTradingDay_Monthly()
 	#tddf.to_pickle(filename_td)
 	tddf = pd.read_pickle(filename_td)
-	tdarray = getTradingDays(tddf)
+	tds = getTradingDays(tddf)
 	
 	#获得因子数据
 	#filename = "./data/factordata_monthly.pkl"
@@ -134,11 +253,14 @@ if __name__ == "__main__":
 	
 	#根据条件筛选出符合要求的
 	#df.sort(
-	ports, nullrecord = handleAllDay(tdarray, "./data/")
-	strdata = json.dumps(ports, default=lambda x:x.__dict__)
-	fileutil.writeFile("./data/final.json", strdata)
+	#ports, nullrecord = handleAllDay(tdarray, "./data/")
+	#strdata = json.dumps(ports, default=lambda x:x.__dict__)
+	#fileutil.writeFile("./data/final.json", strdata)
 	
-	strnullrecord = json.dumps(nullrecord)
-	fileutil.writeFile("./data/nullrecord.json", strnullrecord)
+	#strnullrecord = json.dumps(nullrecord)
+	#fileutil.writeFile("./data/nullrecord.json", strnullrecord)
 	
-	
+	strjson = fileutil.readFile("./data/final.json")
+	ports = json.loads(strjson)
+	datas = workflow(tds, ports)
+	draw(datas)
