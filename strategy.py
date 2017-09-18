@@ -199,7 +199,7 @@ def workflow(tds, ports):
 		items = ports[td]
 		nitems = allocate(items, totalcap)
 		#print("====={0}=====".format(td))
-		if i < num:
+		if i < num-1:
 			filename = "./data/{0}.pkl".format(tds[i+1])
 			df = pd.read_pickle(filename)
 			citems = settle(nitems, df)
@@ -223,7 +223,7 @@ def draw(datas):
 	for i in range(size):
 		current = datas[i]
 		x.append(i+1)
-		xlabel.append(current.td)
+		xlabel.append(current["td"])
 		y_cap.append(current["weights_cap"])
 		y_in.append(current["weights_in"])
 		y_eq.append(current["weights_eq"])
@@ -233,9 +233,10 @@ def draw(datas):
 	ax.set_xticks(x)
 	ax.set_xticklabels(xlabel, rotation=40)
 	#plt.xticks(x, xlabel)
-	plt.plot(x, y_cap)
-	plt.plot(x, y_in)
-	plt.plot(x, y_eq)
+	plt.plot(x, y_cap, label="cap weight")
+	plt.plot(x, y_in, label="income weight")
+	plt.plot(x, y_eq, label="equal weight")
+	plt.legend(loc="center")
 	plt.show()
 	
 if __name__ == "__main__":
