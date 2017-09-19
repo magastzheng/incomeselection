@@ -9,6 +9,8 @@ import numpy as np
 import json
 import fileutil
 import matplotlib.pyplot as plt
+import codecs
+import copy
 
 class SelectItem:
 	def __init__(self, secuCode, industryCode, closeprice, afloatcap, income, weights_cap, weights_in):
@@ -75,7 +77,7 @@ def filter(df):
 
 def getSelectItem(df):
 	#df - DataFrame, 筛选之后得到的数据
-	#return - 一个列表，每个元素为一个SelectItem对象
+	#return - 一个列表，每个元素为一个字典对象
 	
 	itemlst = []
 	totalcap = float(df['AFloatsCap'].sum())
@@ -89,7 +91,16 @@ def getSelectItem(df):
 		weights_cap = afloatcap/totalcap
 		weights_in = income/totalin
 		
-		item = SelectItem(secuCode, industryCode, closeprice, afloatcap, income, weights_cap, weights_in)
+		#item = SelectItem(secuCode, industryCode, closeprice, afloatcap, income, weights_cap, weights_in)
+		item = {
+			"secuCode": secuCode,
+			"industryCode": industryCode,
+			"closeprice": closeprice,
+			"afloatcap": afloatcap,
+			"income": income,
+			"weights_cap": weights_cap,
+			"weights_in": weights_in,
+		}
 		itemlst.append(item)
 		
 	return itemlst
@@ -122,41 +133,52 @@ def handleAllDay(tds, curpath):
 		ports[td] = items
 	return ports, nullrecord
 
-def allocate(items, totalcap):
+def allocate(items, weight_cap_cap, weight_in_cap, weight_eq_cap):
 	#items - 本期列表
-	#totalcap - 本期总市值
+	#weight_cap_cap - 按市值分配权重的总市值
+	#weight_in_cap - 按收入分配的总市值
+	#weight_eq_cap - 等权重分配的总市值
 	#计算各种权重分配的持股数
 	#return - 返回新的列表，在原有基础上添加先字段表示持股数
 	
 	num = len(items)
 	nitems = []
 	for item in items:
-		item["shares_cap"] = totalcap*item["weights_cap"]
-		item["shares_in"] = totalcap * item["weights_in"]
-		item["shares_eq"] = totalcap / num
-		nitems.append(item)
+		nitem = copy.deepcopy(item)
+		closeprice = nitem["closeprice"]
+		if closeprice > 0:
+			nitem["shares_cap"] = weight_cap_cap * nitem["weights_cap"] / closeprice
+			nitem["shares_in"] = weight_in_cap * nitem["weights_in"] / closeprice
+			nitem["shares_eq"] = weight_eq_cap / (num * closeprice) 
+		else:
+			nitem["shares_cap"] = 0.0
+			nitem["shares_in"] = 0.0
+			nitem["shares_eq"] = 0.0
+		nitems.append(nitem)
 	return nitems
 
 def settle(items, df):
-	#计算持股到期时的总市值
-	#items - 持股列表
-	#df - 到期日所有市场行情
+	#计算持股到期时的总市值，组合是上期选出来的，股价在到期时候确定
+	#items - 上一期持股列表
+	#df - 本期全市场股票信息
 	#return - 返回新的列表，在原有列表基础上添加新字段表示到期市值
 	
 	nitems = []
 	for item in items:
-		secuCode = item['secuCode']
+		nitem = copy.deepcopy(item)
+		secuCode = nitem['secuCode']
 		#print("****{0}****".format(secuCode))
 		closeprice = 0.0
 		newdf = df[df['SecuCode'].isin([secuCode])]
 		if len(newdf) > 0:
 			closeprice = float(newdf[newdf['SecuCode'] == secuCode]['ClosePrice'])
 		
-		item['weights_cap_cap'] = closeprice * item['shares_cap']
-		item['weights_in_cap'] = closeprice * item['shares_in']
-		item['weights_eq_cap'] = closeprice * item['shares_eq']
+		nitem["next_closeprice"] = closeprice
+		nitem['weights_cap_cap'] = closeprice * nitem['shares_cap']
+		nitem['weights_in_cap'] = closeprice * nitem['shares_in']
+		nitem['weights_eq_cap'] = closeprice * nitem['shares_eq']
 		
-		nitems.append(item)
+		nitems.append(nitem)
 		
 	return nitems
 
@@ -189,27 +211,44 @@ def getcap(tds, dictdata, totalcap):
 def workflow(tds, ports):
 	#tds - 排好序的交易日
 	#ports - 选出的每期组合, key: 交易日, value: 为股票组合列表
-	#return - 
+	#return - 每一期总市值列表，每个元素是一个字典，包含: td, weights_cap, weights_in, weights_eq
 	
 	datas = []
+	newports = {}
 	num = len(tds)
-	totalcap = 10000
+	weight_cap_cap = 10000.0
+	weight_in_cap = 10000.0
+	weight_eq_cap = 10000.0
 	for i in range(num):
 		td = tds[i]
 		items = ports[td]
-		nitems = allocate(items, totalcap)
-		#print("====={0}=====".format(td))
-		if i < num-1:
-			filename = "./data/{0}.pkl".format(tds[i+1])
+		
+		p = None
+		if i == 0:
+			p = {"td": td, "weights_cap": weight_cap_cap, "weights_in": weight_in_cap, "weights_eq": weight_eq_cap}
+		else:
+			#计算上一期持股到期市值，需要获得上一期组合，在根据本期全市场数据获得收盘价计算
+			prevtd = tds[i-1]
+			previtems = newports[prevtd]
+			filename = "./data/{0}.pkl".format(td)
 			df = pd.read_pickle(filename)
-			citems = settle(nitems, df)
+			citems = settle(previtems, df)
 			p = getcaponeperiod(td, citems)
 			
-			datas.append(p)
-		else:
-			p = {"td": td, "weights_cap": 0, "weights_in": 0, "weights_eq": 0}
-			datas.append(p)
-			
+			#更新新市值
+			weight_cap_cap = p["weights_cap"]
+			weight_in_cap = p["weights_in"]
+			weight_eq_cap = p["weights_eq"]
+		
+		#期初再平衡
+		nitems = allocate(items, weight_cap_cap, weight_in_cap, weight_eq_cap)
+		
+		#存储本期分配后信息，以便计算持有到期市值
+		newports[td] = nitems
+
+		#把当前市值加入列表
+		datas.append(p)
+		
 	return datas
 
 def draw(datas):
@@ -236,16 +275,37 @@ def draw(datas):
 	plt.plot(x, y_cap, label="cap weight")
 	plt.plot(x, y_in, label="income weight")
 	plt.plot(x, y_eq, label="equal weight")
-	plt.legend(loc="center")
+	plt.legend(loc="upper left")
 	plt.show()
-	
+
+def output_port_csv(tdarray, ports, filename):
+	#with codecs.open('./data/port.csv', 
+	fmt = "{0},{1},{2},{3},{4},{5},{6},{7}\n"
+	header = "TradingDay,SecuCode,IndustryCode,ClosePrice,AFloatCap,Income,Weights_cap,Weights_in\n"
+	with codecs.open(filename=filename, mode='w', encoding='utf-8') as f:
+		f.write(header)
+		for td in tdarray:
+			items = ports[td]
+			for item in items:
+				line = fmt.format(td, item["secuCode"], item["industryCode"], item["closeprice"], item["afloatcap"], item["income"], item["weights_cap"], item["weights_in"])
+				f.write(line)
+
+def output_point_csv(datas, filename):
+	fmt = "{0},{1},{2},{3}\n"
+	header = "TradingDay,Weights_cap,Weights_in,Weights_eq\n"
+	with codecs.open(filename=filename, mode='w', encoding='utf-8') as f:
+		f.write(header)
+		for data in datas:
+			line = fmt.format(data["td"], data["weights_cap"], data["weights_in"], data["weights_eq"])
+			f.write(line)
+			
 if __name__ == "__main__":
 	#获得交易日
 	filename_td = "./data/tradingday_monthly.pkl"
 	#tddf = getTradingDay_Monthly()
 	#tddf.to_pickle(filename_td)
 	tddf = pd.read_pickle(filename_td)
-	tds = getTradingDays(tddf)
+	tdarray = getTradingDays(tddf)
 	
 	#获得因子数据
 	#filename = "./data/factordata_monthly.pkl"
@@ -253,7 +313,6 @@ if __name__ == "__main__":
 	#df.to_pickle(filename)
 	
 	#根据条件筛选出符合要求的
-	#df.sort(
 	#ports, nullrecord = handleAllDay(tdarray, "./data/")
 	#strdata = json.dumps(ports, default=lambda x:x.__dict__)
 	#fileutil.writeFile("./data/final.json", strdata)
@@ -261,7 +320,20 @@ if __name__ == "__main__":
 	#strnullrecord = json.dumps(nullrecord)
 	#fileutil.writeFile("./data/nullrecord.json", strnullrecord)
 	
+	#从选出数据中计算权重
 	strjson = fileutil.readFile("./data/final.json")
 	ports = json.loads(strjson)
-	datas = workflow(tds, ports)
+	
+	#output_port_csv(tdarray, ports, "./data/port.csv")
+	datas = workflow(tdarray, ports)
+	
+	strpoints = json.dumps(datas)
+	fileutil.writeFile("./data/point.json", strpoints)
+	
+	#最终分配数据
+	#strpoints = fileutil.readFile("./data/point.json")
+	#datas = json.loads(strpoints)
+	
+	#output_point_csv(datas, "./data/point_csv.csv")
+	
 	draw(datas)
